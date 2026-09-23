@@ -11,6 +11,7 @@ pygame.display.set_caption("Shooter Game")
 
 clock = pygame.time.Clock()
 FPS = 60
+GRAVITY = 0.75
 
 # Player action vars
 moving_left = False
@@ -22,23 +23,28 @@ RED = (255, 0, 0)
 
 def draw_bg():
     screen.fill(BG)
+    pygame.draw.line(screen, RED, (0, 300), (SCREEN_WIDTH, 300))
 
 
 class Soldier(pygame.sprite.Sprite):
     def __init__(self, char_type, x, y, scale, speed):
         super().__init__()
+        self.alive = True
+        self.jump = False
+        self.in_air = False
+
         self.char_type = char_type
         self.speed = speed
         self.direction = 1  # 1: right, -1: left
         self.flip = False
-        
+        self.vel_y = 0
+
         self.animation_list = []
         self.frame_index = 0
-        self.action = 0  # 0: Idle, 1: Run
+        self.action = 0  # 0: Idle, 1: Run, 2: Jump
         self.update_time = pygame.time.get_ticks()
 
-        # Load animation types (0: Idle, 1: Run)
-        animation_types = ['Idle', 'Run']
+        animation_types = ['Idle', 'Run', 'Jump']
         for animation in animation_types:
             temp_list = []
             num_of_frames = 5 if animation == 'Idle' else 6
@@ -76,6 +82,24 @@ class Soldier(pygame.sprite.Sprite):
             self.flip = False
             self.direction = 1
 
+        # Jump physics
+        if self.jump and not self.in_air:
+            self.vel_y = -11
+            self.jump = False
+            self.in_air = True
+
+        # Apply gravity
+        self.vel_y += GRAVITY
+        if self.vel_y > 10:
+            self.vel_y = 10
+        dy += self.vel_y
+
+        # Check floor collision
+        if self.rect.bottom + dy > 300:
+            dy = 300 - self.rect.bottom
+            self.in_air = False
+            self.vel_y = 0
+
         self.rect.x += dx
         self.rect.y += dy
 
@@ -83,10 +107,10 @@ class Soldier(pygame.sprite.Sprite):
         ANIMATION_COOLDOWN = 100
         self.image = self.animation_list[self.action][self.frame_index]
         
-        # Check if enuff time has passed since the last update
         if pygame.time.get_ticks() - self.update_time > ANIMATION_COOLDOWN:
             self.update_time = pygame.time.get_ticks()
             self.frame_index += 1
+
         if self.frame_index >= len(self.animation_list[self.action]):
             self.frame_index = 0
 
@@ -111,10 +135,12 @@ while run:
             run = False
 
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_a:
+            if event.key == pygame.K_a and player.alive:
                 moving_left = True
-            if event.key == pygame.K_d:
+            if event.key == pygame.K_d and player.alive:
                 moving_right = True
+            if event.key == pygame.K_w and player.alive:
+                player.jump = True
             if event.key == pygame.K_ESCAPE:
                 run = False
 
@@ -125,14 +151,20 @@ while run:
                 moving_right = False
 
     draw_bg()
-    if moving_left or moving_right:
-        player.update_action(1)
-    else:
-        player.update_action(0)
-    player.move(moving_left, moving_right)
+
+    if player.alive:
+        # Determine player animation state
+        if player.in_air:
+            player.update_action(2)  # 2: Jump
+        elif moving_left or moving_right:
+            player.update_action(1)  # 1: Run
+        else:
+            player.update_action(0)  # 0: Idle
+        
+        player.move(moving_left, moving_right)
+
     player.update_animation()
 
-    
     player.draw()
     enemy.draw()
 
