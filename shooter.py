@@ -16,6 +16,10 @@ GRENADE_DAMAGE = 30
 GRENADE_RADIUS = 60
 GROUND_Y = 300
 
+ENEMY_COUNT = 2
+ENEMY_SHOOT_RANGE = 500
+ENEMY_SHOOT_COOLDOWN = 90
+
 moving_left = False
 moving_right = False
 shoot = False
@@ -32,6 +36,10 @@ RED = (255, 0, 0)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 GREEN = (0, 200, 0)
+ORANGE = (255, 140, 0)
+
+animation_cache = {}
+explosion_frames_cache = None
 
 
 def draw_bg():
@@ -51,13 +59,67 @@ def draw_health_bar(x, y, health, max_health):
     pygame.draw.rect(screen, GREEN, (x, y, 150 * ratio, 20))
 
 
+def load_soldier_animations(char_type, scale):
+    cache_key = (char_type, scale)
+    if cache_key in animation_cache:
+        return animation_cache[cache_key]
+
+    animation_list = []
+    animation_types = ['Idle', 'Run', 'Jump', 'Death']
+    for animation in animation_types:
+        temp_list = []
+        num_of_frames = 5 if animation == 'Idle' else 6
+
+        for i in range(num_of_frames):
+            img_path = os.path.join(BASE_DIR, "img", char_type, animation, f"{i}.png")
+            if os.path.exists(img_path):
+                img = pygame.image.load(img_path).convert_alpha()
+                img = pygame.transform.scale(
+                    img, (int(img.get_width() * scale), int(img.get_height() * scale))
+                )
+            else:
+                print(f"Missing: {img_path}")
+                img = pygame.Surface((int(32 * scale), int(32 * scale)), pygame.SRCALPHA)
+
+            temp_list.append(img)
+
+        animation_list.append(temp_list)
+
+    animation_cache[cache_key] = animation_list
+    return animation_list
+
+
+def load_explosion_frames(scale=0.5, radius=GRENADE_RADIUS):
+    global explosion_frames_cache
+    if explosion_frames_cache is not None:
+        return explosion_frames_cache
+
+    frames = []
+    for num in range(1, 6):
+        img_path = os.path.join(BASE_DIR, "img", "explosion", f"exp{num}.png")
+        if os.path.exists(img_path):
+            img = pygame.image.load(img_path).convert_alpha()
+            img = pygame.transform.scale(
+                img, (int(img.get_width() * scale), int(img.get_height() * scale))
+            )
+        else:
+            size = int(radius * 2 * (0.4 + num * 0.15))
+            img = pygame.Surface((size, size), pygame.SRCALPHA)
+            pygame.draw.circle(img, ORANGE, (size // 2, size // 2), size // 2)
+        frames.append(img)
+
+    explosion_frames_cache = frames
+    return frames
+
+
 class Soldier(pygame.sprite.Sprite):
-    def __init__(self, char_type, x, y, scale, speed, ammo):
+    def __init__(self, char_type, x, y, scale, speed, ammo, is_ai=False):
         super().__init__()
         self.alive = True
         self.jump = False
         self.in_air = False
         self.char_type = char_type
+        self.is_ai = is_ai
         self.health = 100
         self.max_health = 100
         self.shoot_cooldown = 0
@@ -67,31 +129,11 @@ class Soldier(pygame.sprite.Sprite):
         self.vel_y = 0
         self.ammo = ammo
         self.start_ammo = ammo
-        self.animation_list = []
         self.frame_index = 0
         self.action = 0
         self.update_time = pygame.time.get_ticks()
 
-        animation_types = ['Idle', 'Run', 'Jump', 'Death']
-        for animation in animation_types:
-            temp_list = []
-            num_of_frames = 5 if animation == 'Idle' else 6
-
-            for i in range(num_of_frames):
-                img_path = os.path.join(BASE_DIR, "img", self.char_type, animation, f"{i}.png")
-                if os.path.exists(img_path):
-                    img = pygame.image.load(img_path).convert_alpha()
-                    img = pygame.transform.scale(
-                        img, (int(img.get_width() * scale), int(img.get_height() * scale))
-                    )
-                else:
-                    print(f"Missing: {img_path}")
-                    img = pygame.Surface((int(32 * scale), int(32 * scale)), pygame.SRCALPHA)
-
-                temp_list.append(img)
-
-            self.animation_list.append(temp_list)
-
+        self.animation_list = load_soldier_animations(char_type, scale)
         self.image = self.animation_list[self.action][self.frame_index]
         self.rect = self.image.get_rect()
         self.rect.center = (x, y)
@@ -195,7 +237,7 @@ class Soldier(pygame.sprite.Sprite):
 
 class Bullet(pygame.sprite.Sprite):
     def __init__(self, x, y, direction, owner):
-        pygame.sprite.Sprite.__init__(self)
+        super().__init__()
         self.speed = 10
         self.image = bullet_img
         self.rect = self.image.get_rect()
@@ -209,18 +251,18 @@ class Bullet(pygame.sprite.Sprite):
             self.kill()
             return
 
-        for target in (player, enemy):
+        hits = pygame.sprite.spritecollide(self, characters, False)
+        for target in hits:
             if target is self.owner or not target.alive:
                 continue
-            if self.rect.colliderect(target.rect):
-                target.health -= 5
-                self.kill()
-                break
+            target.health -= 5
+            self.kill()
+            break
 
 
 class Grenade(pygame.sprite.Sprite):
     def __init__(self, x, y, direction, owner):
-        pygame.sprite.Sprite.__init__(self)
+        super().__init__()
         self.timer = GRENADE_FUSE
         self.vel_y = -11
         self.speed = 7
@@ -254,20 +296,80 @@ class Grenade(pygame.sprite.Sprite):
             self.explode()
 
     def explode(self):
-        for target in (player, enemy):
-            if not target.alive:
+        for target in characters:
+            if not target.alive or target is self.owner:
                 continue
             distance = ((target.rect.centerx - self.rect.centerx) ** 2 +
                         (target.rect.centery - self.rect.centery) ** 2) ** 0.5
             if distance <= GRENADE_RADIUS:
-                target.health -= GRENADE_DAMAGE
+                falloff = 1 - (distance / GRENADE_RADIUS) * 0.5
+                target.health -= GRENADE_DAMAGE * falloff
+
+        explosion = Explosion(self.rect.centerx, self.rect.centery, 0.5)
+        explosion_group.add(explosion)
         self.kill()
+
+
+class Explosion(pygame.sprite.Sprite):
+    def __init__(self, x, y, scale):
+        super().__init__()
+        self.images = load_explosion_frames(scale)
+        self.index = 0
+        self.image = self.images[self.index]
+        self.rect = self.image.get_rect()
+        self.rect.center = (x, y)
+        self.counter = 0
+        self.animation_speed = 4
+
+    def update(self):
+        self.counter += 1
+        if self.counter >= self.animation_speed:
+            self.counter = 0
+            self.index += 1
+            if self.index >= len(self.images):
+                self.kill()
+            else:
+                self.image = self.images[self.index]
+                self.rect = self.image.get_rect(center=self.rect.center)
+
+
+def enemy_ai(enemy, player):
+    if not enemy.alive:
+        return
+
+    if not player.alive:
+        enemy.update_action(0)
+        return
+
+    dx = player.rect.centerx - enemy.rect.centerx
+    distance = abs(dx)
+
+    enemy.direction = 1 if dx > 0 else -1
+    enemy.flip = enemy.direction == -1
+
+    if distance <= ENEMY_SHOOT_RANGE:
+        enemy.update_action(0)
+        if enemy.shoot_cooldown == 0 and enemy.ammo > 0:
+            enemy.shoot()
+            enemy.shoot_cooldown = ENEMY_SHOOT_COOLDOWN
+    else:
+        enemy.update_action(0)
 
 
 bullet_group = pygame.sprite.Group()
 grenade_group = pygame.sprite.Group()
+explosion_group = pygame.sprite.Group()
+characters = pygame.sprite.Group()
+
 player = Soldier('player', 200, 200, 3.0, 5, 20)
-enemy = Soldier('enemy', 400, 200, 3.0, 5, 20)
+characters.add(player)
+
+enemy_list = []
+enemy_start_x = 450
+for i in range(ENEMY_COUNT):
+    enemy = Soldier('enemy', enemy_start_x + i * 150, 200, 3.0, 3, 20, is_ai=True)
+    enemy_list.append(enemy)
+    characters.add(enemy)
 
 run = True
 
@@ -306,6 +408,9 @@ while run:
     draw_health_bar(10, 10, player.health, player.max_health)
     draw_text(f"AMMO: {player.ammo}", 10, 40)
 
+    enemies_alive = sum(1 for e in enemy_list if e.alive)
+    draw_text(f"ENEMIES: {enemies_alive}", SCREEN_WIDTH - 160, 10)
+
     if player.alive:
         if shoot:
             player.shoot()
@@ -324,16 +429,19 @@ while run:
     else:
         draw_text("GAME OVER", SCREEN_WIDTH // 2 - 80, SCREEN_HEIGHT // 2, RED)
 
-    player.update()
-    player.draw()
+    for enemy in enemy_list:
+        enemy_ai(enemy, player)
 
-    enemy.update()
-    enemy.draw()
+    for character in characters:
+        character.update()
+        character.draw()
 
     bullet_group.update()
     grenade_group.update()
+    explosion_group.update()
     bullet_group.draw(screen)
     grenade_group.draw(screen)
+    explosion_group.draw(screen)
 
     pygame.display.update()
     clock.tick(FPS)
