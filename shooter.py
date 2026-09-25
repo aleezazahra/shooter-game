@@ -1,4 +1,5 @@
 import os
+import glob
 import pygame
 pygame.init()
 SCREEN_WIDTH = 800
@@ -15,8 +16,14 @@ GRENADE_RADIUS = 60
 GROUND_Y = 300
 ENEMY_COUNT = 2
 ENEMY_SHOOT_RANGE = 500
+ENEMY_CHASE_RANGE = 350
 ENEMY_SHOOT_COOLDOWN = 90
-TILE_SIZE = 40
+
+STATE_PLAYING = "playing"
+STATE_GAME_OVER = "game_over"
+STATE_WIN = "win"
+game_state = STATE_PLAYING
+
 moving_left = False
 moving_right = False
 shoot = False
@@ -38,34 +45,55 @@ item_boxes = {
 }
 
 
-font = pygame.font.SysFont("Futura", 30)
+font = pygame.font.Font(None, 32)
+big_font = pygame.font.Font(None, 64)
 
-BG = (144, 201, 120)
-RED = (255, 0, 0)
-WHITE = (255, 255, 255)
+BG_PURPLE = (86, 42, 122)
+GROUND_LINE = (230, 180, 90)
+RED = (230, 60, 60)
+WHITE = (240, 240, 245)
 BLACK = (0, 0, 0)
-GREEN = (0, 200, 0)
+GREEN = (90, 210, 130)
 ORANGE = (255, 140, 0)
+HUD_BG = (15, 15, 25, 160)
+BUTTON_COLOR = (90, 70, 130)
+BUTTON_HOVER = (120, 95, 170)
 
 animation_cache = {}
 explosion_frames_cache = None
+bg_surface = None
+
+
+def build_background():
+    surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+    surface.fill(BG_PURPLE)
+    pygame.draw.line(surface, GROUND_LINE, (0, GROUND_Y), (SCREEN_WIDTH, GROUND_Y), 3)
+    return surface
 
 
 def draw_bg():
-    screen.fill(BG)
-    pygame.draw.line(screen, RED, (0, GROUND_Y), (SCREEN_WIDTH, GROUND_Y))
+    global bg_surface
+    if bg_surface is None:
+        bg_surface = build_background()
+    screen.blit(bg_surface, (0, 0))
 
 
-def draw_text(text, x, y, color=WHITE):
-    img = font.render(text, True, color)
+def draw_text(text, x, y, color=WHITE, use_font=font):
+    img = use_font.render(text, True, color)
     screen.blit(img, (x, y))
+
+
+def draw_hud_panel(x, y, width, height):
+    panel = pygame.Surface((width, height), pygame.SRCALPHA)
+    pygame.draw.rect(panel, HUD_BG, (0, 0, width, height), border_radius=10)
+    screen.blit(panel, (x, y))
 
 
 def draw_health_bar(x, y, health, max_health):
     ratio = max(health, 0) / max_health
-    pygame.draw.rect(screen, BLACK, (x - 2, y - 2, 154, 24))
-    pygame.draw.rect(screen, RED, (x, y, 150, 20))
-    pygame.draw.rect(screen, GREEN, (x, y, 150 * ratio, 20))
+    pygame.draw.rect(screen, BLACK, (x - 2, y - 2, 154, 24), border_radius=4)
+    pygame.draw.rect(screen, (70, 20, 20), (x, y, 150, 20), border_radius=3)
+    pygame.draw.rect(screen, GREEN, (x, y, 150 * ratio, 20), border_radius=3)
 
 
 def load_soldier_animations(char_type, scale):
@@ -77,19 +105,25 @@ def load_soldier_animations(char_type, scale):
     animation_types = ['Idle', 'Run', 'Jump', 'Death']
     for animation in animation_types:
         temp_list = []
-        num_of_frames = 5 if animation == 'Idle' else 6
+        folder = os.path.join(BASE_DIR, "img", char_type, animation)
+        found_files = glob.glob(os.path.join(folder, "*.png"))
+        frame_numbers = []
+        for path in found_files:
+            name = os.path.splitext(os.path.basename(path))[0]
+            if name.isdigit():
+                frame_numbers.append(int(name))
+        frame_numbers.sort()
 
-        for i in range(num_of_frames):
-            img_path = os.path.join(BASE_DIR, "img", char_type, animation, f"{i}.png")
-            if os.path.exists(img_path):
-                img = pygame.image.load(img_path).convert_alpha()
-                img = pygame.transform.scale(
-                    img, (int(img.get_width() * scale), int(img.get_height() * scale))
-                )
-            else:
-                print(f"Missing: {img_path}")
-                img = pygame.Surface((int(32 * scale), int(32 * scale)), pygame.SRCALPHA)
+        if not frame_numbers:
+            print(f"Missing animation folder or frames: {folder}")
+            frame_numbers = [0]
 
+        for i in frame_numbers:
+            img_path = os.path.join(folder, f"{i}.png")
+            img = pygame.image.load(img_path).convert_alpha()
+            img = pygame.transform.scale(
+                img, (int(img.get_width() * scale), int(img.get_height() * scale))
+            )
             temp_list.append(img)
 
         animation_list.append(temp_list)
@@ -146,7 +180,7 @@ class Soldier(pygame.sprite.Sprite):
         self.animation_list = load_soldier_animations(char_type, scale)
         self.image = self.animation_list[self.action][self.frame_index]
         self.rect = self.image.get_rect()
-        self.rect.center = (x, y)
+        self.rect.midbottom = (x, y)
 
     def update(self):
         self.update_animation()
@@ -195,7 +229,7 @@ class Soldier(pygame.sprite.Sprite):
         if self.alive and self.shoot_cooldown == 0 and self.ammo > 0:
             self.shoot_cooldown = 20
             bullet = Bullet(
-                self.rect.centerx + (0.6 * self.rect.size[0] * self.direction),
+                self.rect.centerx + (0.6 * self.rect.width * self.direction),
                 self.rect.centery,
                 self.direction,
                 self,
@@ -206,7 +240,7 @@ class Soldier(pygame.sprite.Sprite):
     def throw_grenade(self):
         if self.alive and self.grenades > 0:
             grenade = Grenade(
-                self.rect.centerx + (0.5 * self.rect.size[0] * self.direction),
+                self.rect.centerx + (0.5 * self.rect.width * self.direction),
                 self.rect.top,
                 self.direction,
                 self,
@@ -216,7 +250,9 @@ class Soldier(pygame.sprite.Sprite):
 
     def update_animation(self):
         ANIMATION_COOLDOWN = 100
+        old_midbottom = self.rect.midbottom
         self.image = self.animation_list[self.action][self.frame_index]
+        self.rect = self.image.get_rect(midbottom=old_midbottom)
 
         if pygame.time.get_ticks() - self.update_time > ANIMATION_COOLDOWN:
             self.update_time = pygame.time.get_ticks()
@@ -243,16 +279,15 @@ class Soldier(pygame.sprite.Sprite):
 
     def draw(self):
         screen.blit(pygame.transform.flip(self.image, self.flip, False), self.rect)
-        pygame.draw.rect(screen, RED, self.rect, 1)
 
 
 class ItemBox(pygame.sprite.Sprite):
-    def __init__(self, item_type, x, y):
+    def __init__(self, item_type, x):
         super().__init__()
         self.item_type = item_type
         self.image = item_boxes[self.item_type]
         self.rect = self.image.get_rect()
-        self.rect.midtop = (x + TILE_SIZE // 2, y + (TILE_SIZE - self.image.get_height()))
+        self.rect.midbottom = (x, GROUND_Y)
 
     def update(self):
         if pygame.sprite.collide_rect(self, player):
@@ -363,6 +398,51 @@ class Explosion(pygame.sprite.Sprite):
                 self.rect = self.image.get_rect(center=self.rect.center)
 
 
+class Button:
+    def __init__(self, x, y, width, height, text):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.text = text
+
+    def draw(self):
+        mouse_pos = pygame.mouse.get_pos()
+        color = BUTTON_HOVER if self.rect.collidepoint(mouse_pos) else BUTTON_COLOR
+        pygame.draw.rect(screen, color, self.rect, border_radius=8)
+        pygame.draw.rect(screen, WHITE, self.rect, 2, border_radius=8)
+        label = font.render(self.text, True, WHITE)
+        label_rect = label.get_rect(center=self.rect.center)
+        screen.blit(label, label_rect)
+
+    def is_clicked(self, pos):
+        return self.rect.collidepoint(pos)
+
+
+play_again_button = Button(SCREEN_WIDTH // 2 - 90, SCREEN_HEIGHT // 2 + 40, 180, 50, "Play Again")
+
+
+def resolve_enemy_overlap(enemy_list):
+    for i in range(len(enemy_list)):
+        for j in range(i + 1, len(enemy_list)):
+            a = enemy_list[i]
+            b = enemy_list[j]
+            if not a.alive or not b.alive:
+                continue
+            if a.rect.colliderect(b.rect):
+                if a.rect.centerx <= b.rect.centerx:
+                    overlap = a.rect.right - b.rect.left
+                    push = overlap // 2 + 1
+                    a.rect.x -= push
+                    b.rect.x += push
+                else:
+                    overlap = b.rect.right - a.rect.left
+                    push = overlap // 2 + 1
+                    a.rect.x += push
+                    b.rect.x -= push
+                a.rect.left = max(a.rect.left, 0)
+                a.rect.right = min(a.rect.right, SCREEN_WIDTH)
+                b.rect.left = max(b.rect.left, 0)
+                b.rect.right = min(b.rect.right, SCREEN_WIDTH)
+
+
 def enemy_ai(enemy, player):
     if not enemy.alive:
         return
@@ -382,8 +462,16 @@ def enemy_ai(enemy, player):
         if enemy.shoot_cooldown == 0 and enemy.ammo > 0:
             enemy.shoot()
             enemy.shoot_cooldown = ENEMY_SHOOT_COOLDOWN
+        if distance > ENEMY_CHASE_RANGE:
+            moving_toward_left = enemy.direction == -1
+            moving_toward_right = enemy.direction == 1
+            enemy.update_action(1)
+            enemy.move(moving_toward_left, moving_toward_right)
     else:
-        enemy.update_action(0)
+        moving_toward_left = enemy.direction == -1
+        moving_toward_right = enemy.direction == 1
+        enemy.update_action(1)
+        enemy.move(moving_toward_left, moving_toward_right)
 
 
 bullet_group = pygame.sprite.Group()
@@ -391,22 +479,42 @@ grenade_group = pygame.sprite.Group()
 explosion_group = pygame.sprite.Group()
 item_box_group = pygame.sprite.Group()
 characters = pygame.sprite.Group()
-
-
-item_box_group.add(ItemBox("Health", 100, GROUND_Y))
-item_box_group.add(ItemBox("Ammo", 400, GROUND_Y))
-item_box_group.add(ItemBox("Grenade", 500, GROUND_Y))
-
-
-player = Soldier('player', 200, 200, 3.0, 5, 20)
-characters.add(player)
-
+player = None
 enemy_list = []
-enemy_start_x = 450
-for i in range(ENEMY_COUNT):
-    enemy = Soldier('enemy', enemy_start_x + i * 150, 200, 3.0, 3, 20, is_ai=True)
-    enemy_list.append(enemy)
-    characters.add(enemy)
+
+
+def start_game():
+    global player, enemy_list, game_state, moving_left, moving_right, shoot, grenade_key_down, grenade_thrown
+
+    bullet_group.empty()
+    grenade_group.empty()
+    explosion_group.empty()
+    item_box_group.empty()
+    characters.empty()
+
+    item_box_group.add(ItemBox("Health", 100))
+    item_box_group.add(ItemBox("Ammo", 400))
+    item_box_group.add(ItemBox("Grenade", 550))
+
+    player = Soldier('player', 200, GROUND_Y, 3.0, 5, 20)
+    characters.add(player)
+
+    enemy_list = []
+    enemy_start_x = 450
+    for i in range(ENEMY_COUNT):
+        enemy = Soldier('enemy', enemy_start_x + i * 150, GROUND_Y, 3.0, 3, 20, is_ai=True)
+        enemy_list.append(enemy)
+        characters.add(enemy)
+
+    moving_left = False
+    moving_right = False
+    shoot = False
+    grenade_key_down = False
+    grenade_thrown = False
+    game_state = STATE_PLAYING
+
+
+start_game()
 
 run = True
 
@@ -416,18 +524,19 @@ while run:
             run = False
 
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_a and player.alive:
-                moving_left = True
-            if event.key == pygame.K_d and player.alive:
-                moving_right = True
-            if event.key == pygame.K_w and player.alive:
-                player.jump = True
+            if game_state == STATE_PLAYING:
+                if event.key == pygame.K_a and player.alive:
+                    moving_left = True
+                if event.key == pygame.K_d and player.alive:
+                    moving_right = True
+                if event.key == pygame.K_w and player.alive:
+                    player.jump = True
+                if event.key == pygame.K_SPACE:
+                    shoot = True
+                if event.key == pygame.K_q:
+                    grenade_key_down = True
             if event.key == pygame.K_ESCAPE:
                 run = False
-            if event.key == pygame.K_SPACE:
-                shoot = True
-            if event.key == pygame.K_q:
-                grenade_key_down = True
 
         if event.type == pygame.KEYUP:
             if event.key == pygame.K_a:
@@ -440,48 +549,76 @@ while run:
                 grenade_key_down = False
                 grenade_thrown = False
 
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if game_state != STATE_PLAYING and play_again_button.is_clicked(event.pos):
+                start_game()
+
     draw_bg()
 
-    draw_health_bar(10, 10, player.health, player.max_health)
-    draw_text(f"AMMO: {player.ammo}", 10, 40)
-    draw_text(f"GRENADES: {player.grenades}", 10, 70)
+    if game_state == STATE_PLAYING:
+        draw_hud_panel(4, 4, 220, 100)
+        draw_health_bar(14, 14, player.health, player.max_health)
+        draw_text(f"AMMO: {player.ammo}", 14, 44)
+        draw_text(f"GRENADES: {player.grenades}", 14, 74)
 
-    enemies_alive = sum(1 for e in enemy_list if e.alive)
-    draw_text(f"ENEMIES: {enemies_alive}", SCREEN_WIDTH - 160, 10)
+        enemies_alive = sum(1 for e in enemy_list if e.alive)
+        draw_hud_panel(SCREEN_WIDTH - 180, 4, 176, 40)
+        draw_text(f"ENEMIES: {enemies_alive}", SCREEN_WIDTH - 168, 14)
 
-    if player.alive:
-        if shoot:
-            player.shoot()
-        if grenade_key_down and not grenade_thrown:
-            player.throw_grenade()
-            grenade_thrown = True
+        if player.alive:
+            if shoot:
+                player.shoot()
+            if grenade_key_down and not grenade_thrown:
+                player.throw_grenade()
+                grenade_thrown = True
 
-        if player.in_air:
-            player.update_action(2)
-        elif moving_left or moving_right:
-            player.update_action(1)
+            if player.in_air:
+                player.update_action(2)
+            elif moving_left or moving_right:
+                player.update_action(1)
+            else:
+                player.update_action(0)
+
+            player.move(moving_left, moving_right)
         else:
-            player.update_action(0)
+            game_state = STATE_GAME_OVER
 
-        player.move(moving_left, moving_right)
+        for enemy in enemy_list:
+            enemy_ai(enemy, player)
+
+        resolve_enemy_overlap(enemy_list)
+
+        if enemies_alive == 0:
+            game_state = STATE_WIN
+
+        item_box_group.update()
+        item_box_group.draw(screen)
+
+        for character in characters:
+            character.update()
+            character.draw()
+
+        bullet_group.update()
+        grenade_group.update()
+        explosion_group.update()
+        bullet_group.draw(screen)
+        grenade_group.draw(screen)
+        explosion_group.draw(screen)
+
     else:
-        draw_text("GAME OVER", SCREEN_WIDTH // 2 - 80, SCREEN_HEIGHT // 2, RED)
+        item_box_group.draw(screen)
+        for character in characters:
+            character.update()
+            character.draw()
+        explosion_group.update()
+        explosion_group.draw(screen)
 
-    for enemy in enemy_list:
-        enemy_ai(enemy, player)
-
-    for character in characters:
-        character.update()
-        character.draw()
-
-    bullet_group.update()
-    grenade_group.update()
-    explosion_group.update()
-    bullet_group.draw(screen)
-    grenade_group.draw(screen)
-    explosion_group.draw(screen)
-    item_box_group.update()
-    item_box_group.draw(screen)
+        message = "GAME OVER" if game_state == STATE_GAME_OVER else "YOU WIN"
+        color = RED if game_state == STATE_GAME_OVER else GREEN
+        text_img = big_font.render(message, True, color)
+        text_rect = text_img.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 30))
+        screen.blit(text_img, text_rect)
+        play_again_button.draw()
 
     pygame.display.update()
     clock.tick(FPS)
